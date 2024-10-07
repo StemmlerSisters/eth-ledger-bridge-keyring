@@ -85,10 +85,18 @@ type IFramePostMessage<TAction extends IFrameMessageAction> =
     target: typeof LEDGER_IFRAME_ID;
   };
 
-export class LedgerIframeBridge implements LedgerBridge {
+export type LedgerIframeBridgeOptions = {
+  bridgeUrl: string;
+};
+
+export class LedgerIframeBridge
+  implements LedgerBridge<LedgerIframeBridgeOptions>
+{
   iframe?: HTMLIFrameElement;
 
   iframeLoaded = false;
+
+  #opts: LedgerIframeBridgeOptions;
 
   eventListener?: (eventMessage: {
     origin: string;
@@ -102,16 +110,21 @@ export class LedgerIframeBridge implements LedgerBridge {
   messageCallbacks: Record<number, (response: IFrameMessageResponse) => void> =
     {};
 
-  delayedPromise?: {
-    resolve: (value: boolean) => void;
-    reject: (error: unknown) => void;
-    transportType: string;
-  };
+  constructor(
+    opts: LedgerIframeBridgeOptions = {
+      bridgeUrl: 'https://metamask.github.io/eth-ledger-bridge-keyring',
+    },
+  ) {
+    this.#validateConfiguration(opts);
+    this.#opts = {
+      bridgeUrl: opts?.bridgeUrl,
+    };
+  }
 
-  async init(bridgeUrl: string) {
-    this.#setupIframe(bridgeUrl);
+  async init() {
+    await this.#setupIframe(this.#opts.bridgeUrl);
 
-    this.eventListener = this.#eventListener.bind(this, bridgeUrl);
+    this.eventListener = this.#eventListener.bind(this, this.#opts.bridgeUrl);
 
     window.addEventListener('message', this.eventListener);
   }
@@ -119,6 +132,19 @@ export class LedgerIframeBridge implements LedgerBridge {
   async destroy() {
     if (this.eventListener) {
       window.removeEventListener('message', this.eventListener);
+    }
+  }
+
+  async getOptions(): Promise<LedgerIframeBridgeOptions> {
+    return this.#opts;
+  }
+
+  async setOptions(opts: LedgerIframeBridgeOptions): Promise<void> {
+    this.#validateConfiguration(opts);
+    if (this.#opts?.bridgeUrl !== opts.bridgeUrl) {
+      this.#opts.bridgeUrl = opts.bridgeUrl;
+      await this.destroy();
+      await this.init();
     }
   }
 
@@ -146,12 +172,7 @@ export class LedgerIframeBridge implements LedgerBridge {
       // If the iframe isn't loaded yet, let's store the desired transportType value and
       // optimistically return a successful promise
       if (!this.iframeLoaded) {
-        this.delayedPromise = {
-          resolve,
-          reject,
-          transportType,
-        };
-        return;
+        throw new Error('The iframe is not loaded yet');
       }
 
       this.#sendMessage(
@@ -250,28 +271,17 @@ export class LedgerIframeBridge implements LedgerBridge {
     });
   }
 
-  #setupIframe(bridgeUrl: string) {
-    this.iframe = document.createElement('iframe');
-    this.iframe.src = bridgeUrl;
-    this.iframe.allow = `hid 'src'`;
-    this.iframe.onload = async () => {
-      // If the ledger live preference was set before the iframe is loaded,
-      // set it after the iframe has loaded
-      this.iframeLoaded = true;
-      if (this.delayedPromise) {
-        try {
-          const result = await this.updateTransportMethod(
-            this.delayedPromise.transportType,
-          );
-          this.delayedPromise.resolve(result);
-        } catch (error) {
-          this.delayedPromise.reject(error);
-        } finally {
-          delete this.delayedPromise;
-        }
-      }
-    };
-    document.head.appendChild(this.iframe);
+  async #setupIframe(bridgeUrl: string): Promise<void> {
+    return new Promise((resolve) => {
+      this.iframe = document.createElement('iframe');
+      this.iframe.src = bridgeUrl;
+      this.iframe.allow = `hid 'src'`;
+      this.iframe.onload = async () => {
+        this.iframeLoaded = true;
+        resolve();
+      };
+      document.head.appendChild(this.iframe);
+    });
   }
 
   #getOrigin(bridgeUrl: string) {
@@ -323,5 +333,11 @@ export class LedgerIframeBridge implements LedgerBridge {
     }
 
     this.iframe.contentWindow.postMessage(postMsg, '*');
+  }
+
+  #validateConfiguration(opts: LedgerIframeBridgeOptions): void {
+    if (typeof opts.bridgeUrl !== 'string' || opts.bridgeUrl.length === 0) {
+      throw new Error('bridgeURL is not a valid URL');
+    }
   }
 }

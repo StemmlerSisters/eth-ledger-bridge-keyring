@@ -15,25 +15,25 @@ import type OldEthJsTransaction from 'ethereumjs-tx';
 import { EventEmitter } from 'events';
 import HDKey from 'hdkey';
 
-import { LedgerBridge } from './ledger-bridge';
+import { LedgerBridge, LedgerBridgeOptions } from './ledger-bridge';
+import { LedgerIframeBridgeOptions } from './ledger-iframe-bridge';
 
 const pathBase = 'm';
 const hdPathString = `${pathBase}/44'/60'/0'`;
 const keyringType = 'Ledger Hardware';
 
-const BRIDGE_URL = 'https://metamask.github.io/eth-ledger-bridge-keyring';
-
+// This number causes one of our failing tests to run very slowly, as the for loop needs to iterate 1000 times.
 const MAX_INDEX = 1000;
 
 enum NetworkApiUrls {
-  Ropsten = 'http://api-ropsten.etherscan.io',
-  Kovan = 'http://api-kovan.etherscan.io',
+  Ropsten = 'https://api-ropsten.etherscan.io',
+  Kovan = 'https://api-kovan.etherscan.io',
   Rinkeby = 'https://api-rinkeby.etherscan.io',
-  Mainnet = 'https://api.etherscan.io',
+  Mainnet = `https://api.etherscan.io`,
 }
 
 type SignTransactionPayload = Awaited<
-  ReturnType<LedgerBridge['deviceSignTransaction']>
+  ReturnType<LedgerBridge<LedgerIframeBridgeOptions>['deviceSignTransaction']>
 >;
 
 export type AccountDetails = {
@@ -45,9 +45,9 @@ export type AccountDetails = {
 export type LedgerBridgeKeyringOptions = {
   hdPath: string;
   accounts: readonly string[];
+  deviceId: string;
   accountDetails: Readonly<Record<string, AccountDetails>>;
   accountIndexes: Readonly<Record<string, number>>;
-  bridgeUrl: string;
   implementFullBIP44: boolean;
 };
 
@@ -73,6 +73,8 @@ function isOldStyleEthereumjsTx(
 export class LedgerKeyring extends EventEmitter {
   static type: string = keyringType;
 
+  deviceId = '';
+
   readonly type: string = keyringType;
 
   page = 0;
@@ -95,11 +97,9 @@ export class LedgerKeyring extends EventEmitter {
 
   implementFullBIP44 = false;
 
-  bridgeUrl: string = BRIDGE_URL;
+  bridge: LedgerBridge<LedgerBridgeOptions>;
 
-  bridge: LedgerBridge;
-
-  constructor({ bridge }: { bridge: LedgerBridge }) {
+  constructor({ bridge }: { bridge: LedgerBridge<LedgerBridgeOptions> }) {
     super();
 
     if (!bridge) {
@@ -110,7 +110,7 @@ export class LedgerKeyring extends EventEmitter {
   }
 
   async init() {
-    return this.bridge.init(this.bridgeUrl);
+    return this.bridge.init();
   }
 
   async destroy() {
@@ -121,31 +121,39 @@ export class LedgerKeyring extends EventEmitter {
     return {
       hdPath: this.hdPath,
       accounts: this.accounts,
+      deviceId: this.deviceId,
       accountDetails: this.accountDetails,
-      bridgeUrl: this.bridgeUrl,
       implementFullBIP44: false,
     };
   }
 
   async deserialize(opts: Partial<LedgerBridgeKeyringOptions> = {}) {
     this.hdPath = opts.hdPath ?? hdPathString;
-    this.bridgeUrl = opts.bridgeUrl ?? BRIDGE_URL;
     this.accounts = opts.accounts ?? [];
+    this.deviceId = opts.deviceId ?? '';
     this.accountDetails = opts.accountDetails ?? {};
+
     if (!opts.accountDetails) {
       this.#migrateAccountDetails(opts);
     }
 
     this.implementFullBIP44 = opts.implementFullBIP44 ?? false;
 
+    const keys = new Set<string>(Object.keys(this.accountDetails));
     // Remove accounts that don't have corresponding account details
     this.accounts = this.accounts.filter((account) =>
-      Object.keys(this.accountDetails).includes(
-        ethUtil.toChecksumAddress(account),
-      ),
+      keys.has(ethUtil.toChecksumAddress(account)),
     );
 
     return Promise.resolve();
+  }
+
+  public setDeviceId(deviceId: string) {
+    this.deviceId = deviceId;
+  }
+
+  public getDeviceId() {
+    return this.deviceId;
   }
 
   #migrateAccountDetails(opts: Partial<LedgerBridgeKeyringOptions>) {
@@ -157,40 +165,32 @@ export class LedgerKeyring extends EventEmitter {
         };
       }
     }
-
+    const keys = new Set<string>(Object.keys(this.accountDetails));
     // try to migrate non-LedgerLive accounts too
     if (!this.#isLedgerLiveHdPath()) {
-      this.accounts
-        .filter(
-          (account) =>
-            !Object.keys(this.accountDetails).includes(
-              ethUtil.toChecksumAddress(account),
-            ),
-        )
-        .forEach((account) => {
-          try {
-            this.accountDetails[ethUtil.toChecksumAddress(account)] = {
-              bip44: false,
-              hdPath: this.#pathFromAddress(account),
-            };
-          } catch (error) {
-            console.log(`failed to migrate account ${account}`);
-          }
-        });
+      this.accounts.forEach((account) => {
+        const key = ethUtil.toChecksumAddress(account);
+
+        if (!keys.has(key)) {
+          this.accountDetails[key] = {
+            bip44: false,
+            hdPath: this.#pathFromAddress(account),
+          };
+        }
+      });
     }
   }
 
   isUnlocked() {
-    return Boolean(this.hdk?.publicKey);
+    return Boolean(this.hdk.publicKey);
   }
 
   isConnected() {
     return this.bridge.isDeviceConnected;
   }
 
-  setAccountToUnlock(index: number | string) {
-    this.unlockedAccount =
-      typeof index === 'number' ? index : parseInt(index, 10);
+  setAccountToUnlock(index: number) {
+    this.unlockedAccount = index;
   }
 
   setHdPath(hdPath: string) {
@@ -213,7 +213,9 @@ export class LedgerKeyring extends EventEmitter {
         hdPath: path,
       });
     } catch (error) {
-      throw error instanceof Error ? error : new Error('Unknown error');
+      throw error instanceof Error
+        ? error
+        : new Error('Ledger Ethereum app closed. Open it to unlock.');
     }
 
     if (updateHdk && payload.chainCode) {
@@ -257,6 +259,10 @@ export class LedgerKeyring extends EventEmitter {
     });
   }
 
+  getName() {
+    return keyringType;
+  }
+
   async getFirstPage() {
     this.page = 0;
     return this.#getPage(1);
@@ -275,15 +281,15 @@ export class LedgerKeyring extends EventEmitter {
   }
 
   removeAccount(address: string) {
-    if (
-      !this.accounts.map((a) => a.toLowerCase()).includes(address.toLowerCase())
-    ) {
+    const filteredAccounts = this.accounts.filter(
+      (a) => a.toLowerCase() !== address.toLowerCase(),
+    );
+
+    if (filteredAccounts.length === this.accounts.length) {
       throw new Error(`Address ${address} not found in this keyring`);
     }
 
-    this.accounts = this.accounts.filter(
-      (a) => a.toLowerCase() !== address.toLowerCase(),
-    );
+    this.accounts = filteredAccounts;
     delete this.accountDetails[ethUtil.toChecksumAddress(address)];
   }
 
@@ -311,11 +317,11 @@ export class LedgerKeyring extends EventEmitter {
       // transaction which is only communicated to ethereumjs-tx in this
       // value. In newer versions the chainId is communicated via the 'Common'
       // object.
-      // @ts-expect-error tx.v should be a Buffer but we are assigning a string
+      // @ts-expect-error tx.v should be a Buffer, but we are assigning a string
       tx.v = ethUtil.bufferToHex(tx.getChainId());
-      // @ts-expect-error tx.r should be a Buffer but we are assigning a string
+      // @ts-expect-error tx.r should be a Buffer, but we are assigning a string
       tx.r = '0x00';
-      // @ts-expect-error tx.s should be a Buffer but we are assigning a string
+      // @ts-expect-error tx.s should be a Buffer, but we are assigning a string
       tx.s = '0x00';
 
       rawTxHex = tx.serialize().toString('hex');
@@ -419,11 +425,12 @@ export class LedgerKeyring extends EventEmitter {
         : new Error('Ledger: Unknown error while signing message');
     }
 
-    let recoveryId = parseInt(String(payload.v), 10).toString(16);
-    if (recoveryId.length < 2) {
-      recoveryId = `0${recoveryId}`;
+    let modifiedV = parseInt(String(payload.v), 10).toString(16);
+    if (modifiedV.length < 2) {
+      modifiedV = `0${modifiedV}`;
     }
-    const signature = `0x${payload.r}${payload.s}${recoveryId}`;
+
+    const signature = `0x${payload.r}${payload.s}${modifiedV}`;
     const addressSignedWith = recoverPersonalSignature({
       data: message,
       signature,
@@ -514,6 +521,7 @@ export class LedgerKeyring extends EventEmitter {
       signature,
       version: SignTypedDataVersion.V4,
     });
+
     if (
       ethUtil.toChecksumAddress(addressSignedWith) !==
       ethUtil.toChecksumAddress(withAccount)
@@ -652,10 +660,7 @@ export class LedgerKeyring extends EventEmitter {
       `${apiUrl}/api?module=account&action=txlist&address=${address}&tag=latest&page=1&offset=1`,
     );
     const parsedResponse = await response.json();
-    if (parsedResponse.status !== '0' && parsedResponse.result.length > 0) {
-      return true;
-    }
-    return false;
+    return parsedResponse.status !== '0' && parsedResponse.result.length > 0;
   }
 
   #getApiUrl() {

@@ -1,11 +1,10 @@
 import type LedgerHwAppEth from '@ledgerhq/hw-app-eth';
+import type Transport from '@ledgerhq/hw-transport';
 
 export type GetPublicKeyParams = { hdPath: string };
 export type GetPublicKeyResponse = Awaited<
   ReturnType<LedgerHwAppEth['getAddress']>
-> & {
-  chainCode: string;
-};
+>;
 
 export type LedgerSignTransactionParams = { hdPath: string; tx: string };
 export type LedgerSignTransactionResponse = Awaited<
@@ -26,17 +25,30 @@ export type LedgerSignTypedDataResponse = Awaited<
   ReturnType<LedgerHwAppEth['signEIP712HashedMessage']>
 >;
 
-// eslint-disable-next-line @typescript-eslint/consistent-type-definitions
-export interface LedgerBridge {
+export type LedgerBridgeOptions = Record<string, unknown>;
+
+export type LedgerBridge<T extends LedgerBridgeOptions> = {
   isDeviceConnected: boolean;
 
-  init(bridgeUrl: string): Promise<void>;
+  init(): Promise<void>;
 
   destroy(): Promise<void>;
 
+  /**
+   * Method to get the current configuration of the ledger bridge keyring.
+   */
+  getOptions(): Promise<T>;
+
+  /**
+   * Method to set the current configuration of the ledger bridge keyring.
+   *
+   * @param opts - An object contains configuration of the bridge.
+   */
+  setOptions(opts: T): Promise<void>;
+
   attemptMakeApp(): Promise<boolean>;
 
-  updateTransportMethod(transportType: string): Promise<boolean>;
+  updateTransportMethod(transportType: string | Transport): Promise<boolean>;
 
   getPublicKey(params: GetPublicKeyParams): Promise<GetPublicKeyResponse>;
 
@@ -51,4 +63,4 @@ export interface LedgerBridge {
   deviceSignTypedData(
     params: LedgerSignTypedDataParams,
   ): Promise<LedgerSignTypedDataResponse>;
-}
+};
